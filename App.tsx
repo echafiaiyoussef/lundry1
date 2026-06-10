@@ -153,6 +153,42 @@ const App: React.FC = () => {
   const [inventoryConsumption, setInventoryConsumption] = useState<Record<string, Record<string, number>>>({});
   const [customItemConsumptions, setCustomItemConsumptions] = useState<Record<string, number>>({});
   const [editingConsumptionItem, setEditingConsumptionItem] = useState<any | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
+  const getGroupedItems = (items: any[]) => {
+    if (!items) return [];
+    const groups: Record<string, { key: string; item: any; totalQty: number; totalPrice: number; originalItems: any[] }> = {};
+    items.forEach(item => {
+      const opts: string[] = [];
+      if (item.service_type === 'مستعجل' || (item as any).is_urgent) opts.push('مستعجل');
+      if (item.is_ironing_only) opts.push('كوي');
+      if ((item as any).is_no_ironing || item.ironing_type === 'بدون كوي') opts.push('بدون كوي');
+      if (opts.length === 0) opts.push('عادي');
+      const optStr = opts.join('+');
+      const key = `${item.name}_${optStr}`;
+      
+      if (!groups[key]) {
+        groups[key] = {
+          key,
+          item: { ...item },
+          totalQty: 0,
+          totalPrice: 0,
+          originalItems: []
+        };
+      }
+      groups[key].totalQty += item.quantity || 1;
+      groups[key].totalPrice += (item.price || 0) * (item.quantity || 1);
+      groups[key].originalItems.push(item);
+    });
+    return Object.values(groups);
+  };
+
+  const toggleExpandGroup = (orderId: string, groupKey: string) => {
+    setExpandedGroups(prev => ({
+      ...prev,
+      [`${orderId}_${groupKey}`]: !prev[`${orderId}_${groupKey}`]
+    }));
+  };
 
   const syncInventoryConsumptionToDb = async (newCons: Record<string, Record<string, number>>) => {
     try {
@@ -222,7 +258,7 @@ const App: React.FC = () => {
 
   const [isEditingPrices, setIsEditingPrices] = useState(false);
   const [showCustomItemModal, setShowCustomItemModal] = useState(false);
-  const [customItemForm, setCustomItemForm] = useState({ name: '', price_normal: 0, price_urgent: 0, price_ironing: 0, price_no_ironing: 0 });
+  const [customItemForm, setCustomItemForm] = useState({ name: '', price: 0, price_normal: 0, price_urgent: 0, price_ironing: 0, price_no_ironing: 0 });
 
   const [sendingMessageIds, setSendingMessageIds] = useState<Set<string>>(new Set());
   const [timeFilter, setTimeFilter] = useState<'all' | '1h' | '24h' | '48h'>('all');
@@ -466,7 +502,7 @@ const App: React.FC = () => {
     }).filter(i => i.quantity > 0));
   };
 
-  const updateEditItemOption = (id: string, option: 'urgent' | 'ironing' | 'no_ironing', enabled: boolean) => {
+  const updateEditItemOption = (id: string, option: 'urgent' | 'ironing' | 'no_ironing' | 'normal', enabled: boolean) => {
     setEditOrderItems(prev => prev.map(i => {
       if (i.id === id) {
         const prices = getItemPrices(i);
@@ -475,11 +511,17 @@ const App: React.FC = () => {
         const ironing = prices.price_ironing;
         const noIron = prices.price_no_ironing;
 
+        const basePrice = i.base_price !== undefined ? i.base_price : (i.price ?? 5);
+
+        const is_normal = option === 'normal' ? enabled : (i.is_normal || false);
         const is_urgent = option === 'urgent' ? enabled : (i.is_urgent || false);
         const is_ironing_only = option === 'ironing' ? enabled : (i.is_ironing_only || false);
         const is_no_ironing = option === 'no_ironing' ? enabled : (i.is_no_ironing || false);
 
-        let finalPrice = normal;
+        let finalPrice = basePrice;
+        if (is_normal) {
+          finalPrice += normal;
+        }
         if (is_urgent) {
           finalPrice += urgent;
         }
@@ -492,16 +534,37 @@ const App: React.FC = () => {
 
         return {
           ...i,
+          is_normal,
           is_urgent,
           is_ironing_only,
           is_no_ironing,
-          service_type: is_urgent ? 'مستعجل' : 'عادي',
+          service_type: is_urgent ? 'مستعجل' : (is_normal ? 'عادي' : undefined),
           ironing_type: is_ironing_only ? 'كوي فقط' : (is_no_ironing ? 'بدون كوي' : 'غسيل وكوي'),
-          price: finalPrice
+          price: finalPrice,
+          base_price: basePrice
         };
       }
       return i;
     }));
+  };
+
+  const updateEditItemMode = (id: string, mode: 'عادي' | 'مستعجل' | 'كوي' | 'بدون كوي') => {
+    const item = editOrderItems.find(i => i.id === id);
+    if (!item) return;
+
+    if (mode === 'عادي') {
+      const isNormal = item.is_normal || false;
+      updateEditItemOption(id, 'normal', !isNormal);
+    } else if (mode === 'مستعجل') {
+      const isUrgent = item.is_urgent || item.service_type === 'مستعجل' || false;
+      updateEditItemOption(id, 'urgent', !isUrgent);
+    } else if (mode === 'كوي') {
+      const isIroning = item.is_ironing_only || false;
+      updateEditItemOption(id, 'ironing', !isIroning);
+    } else if (mode === 'بدون كوي') {
+      const isNoIron = item.is_no_ironing || false;
+      updateEditItemOption(id, 'no_ironing', !isNoIron);
+    }
   };
 
   const updateEditItemCustomPrice = (id: string, type: 'normal' | 'urgent' | 'ironing' | 'no_ironing', priceValue: number) => {
@@ -520,11 +583,17 @@ const App: React.FC = () => {
           price_no_ironing: type === 'no_ironing' ? priceValue : noIron,
         };
 
-        const is_urgent = i.is_urgent || (i.service_type === 'مستعجل');
-        const is_ironing_only = i.is_ironing_only || (i.ironing_type === 'كوي فقط');
-        const is_no_ironing = i.is_no_ironing || (i.ironing_type === 'بدون كوي');
+        const is_normal = i.is_normal || false;
+        const is_urgent = i.is_urgent || (i.service_type === 'مستعجل') || false;
+        const is_ironing_only = i.is_ironing_only || (i.ironing_type === 'كوي فقط') || false;
+        const is_no_ironing = i.is_no_ironing || (i.ironing_type === 'بدون كوي') || false;
 
-        let activePrice = updatedPrices.price_normal;
+        const basePrice = i.base_price !== undefined ? i.base_price : (i.price ?? 5);
+
+        let activePrice = basePrice;
+        if (is_normal) {
+          activePrice += updatedPrices.price_normal;
+        }
         if (is_urgent) {
           activePrice += updatedPrices.price_urgent;
         }
@@ -1100,29 +1169,31 @@ const App: React.FC = () => {
         id, 
         name: item.name, 
         quantity: 1, 
-        price: normal, 
-        service_type: 'عادي', 
+        price: item.price, 
+        service_type: undefined, 
         is_ironing_only: false,
-        ironing_type: 'غسيل وكوي',
+        ironing_type: undefined,
         is_urgent: false,
         is_no_ironing: false,
         price_normal: normal,
         price_urgent: urgent,
         price_ironing: ironing,
-        price_no_ironing: noIron
+        price_no_ironing: noIron,
+        base_price: item.price,
+        is_normal: false
       }]
     }));
   };
 
   const handleAddCustomItem = async () => {
-    if (!customItemForm.name || customItemForm.price_normal < 0 || customItemForm.price_urgent < 0 || customItemForm.price_ironing < 0 || customItemForm.price_no_ironing < 0) {
+    if (!customItemForm.name || customItemForm.price < 0 || customItemForm.price_normal < 0 || customItemForm.price_urgent < 0 || customItemForm.price_ironing < 0 || customItemForm.price_no_ironing < 0) {
       return alert('يرجى إدخال اسم صحيح وأسعار لا تقل عن الصفر');
     }
     
     try {
       const newCat = {
         name: customItemForm.name,
-        price: customItemForm.price_normal,
+        price: customItemForm.price,
         icon: '✨'
       };
       
@@ -1156,7 +1227,7 @@ const App: React.FC = () => {
         ...returnedRow,
         id: returnedRow.id,
         name: customItemForm.name,
-        price: customItemForm.price_normal,
+        price: customItemForm.price,
         icon: '✨',
         price_normal: customItemForm.price_normal,
         price_urgent: customItemForm.price_urgent,
@@ -1206,23 +1277,25 @@ const App: React.FC = () => {
           id: savedCat.id, 
           name: savedCat.name, 
           quantity: 1, 
-          price: customItemForm.price_normal, 
-          service_type: 'عادي', 
+          price: customItemForm.price, 
+          service_type: undefined, 
           is_ironing_only: false,
-          ironing_type: 'غسيل وكوي',
+          ironing_type: undefined,
           is_urgent: false,
           is_no_ironing: false,
           price_normal: customItemForm.price_normal,
           price_urgent: customItemForm.price_urgent,
           price_ironing: customItemForm.price_ironing,
-          price_no_ironing: customItemForm.price_no_ironing
+          price_no_ironing: customItemForm.price_no_ironing,
+          base_price: customItemForm.price,
+          is_normal: false
         }]
       }));
     } catch (e: any) {
       alert(`فشل إضافة الصنف: ${e.message}`);
     }
     
-    setCustomItemForm({ name: '', price_normal: 0, price_urgent: 0, price_ironing: 0, price_no_ironing: 0 });
+    setCustomItemForm({ name: '', price: 0, price_normal: 0, price_urgent: 0, price_ironing: 0, price_no_ironing: 0 });
     setCustomItemConsumptions({});
     setShowCustomItemModal(false);
   };
@@ -1349,7 +1422,7 @@ const App: React.FC = () => {
     };
   };
 
-  const updateItemOption = (id: string, option: 'urgent' | 'ironing' | 'no_ironing', enabled: boolean) => {
+  const updateItemOption = (id: string, option: 'urgent' | 'ironing' | 'no_ironing' | 'normal', enabled: boolean) => {
     setNewOrder(prev => {
       const updatedItems = prev.items.map(i => {
         if (i.id === id) {
@@ -1359,11 +1432,17 @@ const App: React.FC = () => {
           const ironing = prices.price_ironing;
           const noIron = prices.price_no_ironing;
 
+          const basePrice = i.base_price !== undefined ? i.base_price : (i.price ?? 5);
+
+          const is_normal = option === 'normal' ? enabled : (i.is_normal || false);
           const is_urgent = option === 'urgent' ? enabled : (i.is_urgent || false);
           const is_ironing_only = option === 'ironing' ? enabled : (i.is_ironing_only || false);
           const is_no_ironing = option === 'no_ironing' ? enabled : (i.is_no_ironing || false);
 
-          let finalPrice = normal;
+          let finalPrice = basePrice;
+          if (is_normal) {
+            finalPrice += normal;
+          }
           if (is_urgent) {
             finalPrice += urgent;
           }
@@ -1380,12 +1459,14 @@ const App: React.FC = () => {
             price_urgent: urgent,
             price_ironing: ironing,
             price_no_ironing: noIron,
+            is_normal,
             is_urgent,
             is_ironing_only,
             is_no_ironing,
-            service_type: is_urgent ? 'مستعجل' : 'عادي',
-            ironing_type: is_ironing_only ? 'كوي' : (is_no_ironing ? 'بدون كوي' : 'غسيل وكوي'),
-            price: finalPrice
+            service_type: is_urgent ? 'مستعجل' : (is_normal ? 'عادي' : undefined),
+            ironing_type: is_ironing_only ? 'كوي' : (is_no_ironing ? 'بدون كوي' : undefined),
+            price: finalPrice,
+            base_price: basePrice
           };
         }
         return i;
@@ -1395,31 +1476,21 @@ const App: React.FC = () => {
   };
 
   const updateItemMode = (id: string, mode: 'عادي' | 'مستعجل' | 'كوي' | 'بدون كوي') => {
+    const item = newOrder.items.find(i => i.id === id);
+    if (!item) return;
+
     if (mode === 'عادي') {
-      setNewOrder(prev => {
-        const updatedItems = prev.items.map(i => {
-          if (i.id === id) {
-            const normal = i.price_normal !== undefined && i.price_normal !== null ? i.price_normal : getBaseItemPrice(i.name);
-            return {
-              ...i,
-              is_urgent: false,
-              is_ironing_only: false,
-              is_no_ironing: false,
-              service_type: 'عادي',
-              ironing_type: 'غسيل وكوي',
-              price: normal
-            };
-          }
-          return i;
-        });
-        return { ...prev, items: updatedItems };
-      });
+      const isNormal = item.is_normal || false;
+      updateItemOption(id, 'normal', !isNormal);
     } else if (mode === 'مستعجل') {
-      updateItemOption(id, 'urgent', true);
+      const isUrgent = item.is_urgent || item.service_type === 'مستعجل' || false;
+      updateItemOption(id, 'urgent', !isUrgent);
     } else if (mode === 'كوي') {
-      updateItemOption(id, 'ironing', true);
+      const isIroning = item.is_ironing_only || false;
+      updateItemOption(id, 'ironing', !isIroning);
     } else if (mode === 'بدون كوي') {
-      updateItemOption(id, 'no_ironing', true);
+      const isNoIron = item.is_no_ironing || false;
+      updateItemOption(id, 'no_ironing', !isNoIron);
     }
   };
 
@@ -1440,11 +1511,17 @@ const App: React.FC = () => {
             price_no_ironing: type === 'no_ironing' ? priceValue : noIron
           };
 
+          const is_normal = i.is_normal || false;
           const is_urgent = i.is_urgent || false;
           const is_ironing_only = i.is_ironing_only || false;
           const is_no_ironing = i.is_no_ironing || false;
 
-          let activePrice = updatedPrices.price_normal;
+          const basePrice = i.base_price !== undefined ? i.base_price : (i.price ?? 5);
+
+          let activePrice = basePrice;
+          if (is_normal) {
+            activePrice += updatedPrices.price_normal;
+          }
           if (is_urgent) {
             activePrice += updatedPrices.price_urgent;
           }
@@ -1826,8 +1903,9 @@ const App: React.FC = () => {
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
 
-    const itemsHtml = order.items.map(item => {
+    const itemsHtml = getGroupedItems(order.items || []).map((group, idx) => {
       const opts: string[] = [];
+      const item = group.item;
       if (item.service_type === 'مستعجل' || (item as any).is_urgent) opts.push('مستعجل 🔥');
       if (item.is_ironing_only) opts.push('كوي');
       if ((item as any).is_no_ironing || item.ironing_type === 'بدون كوي') opts.push('بدون كوي');
@@ -1835,14 +1913,26 @@ const App: React.FC = () => {
       const optionsText = opts.join(' + ');
       
       return `
-        <tr>
-          <td>
+        <tr class="group-header-row" onclick="const detail = document.getElementById('print-detail-${idx}'); if(detail) { detail.style.display = detail.style.display === 'none' ? 'table-row-group' : 'none'; }" style="cursor: pointer; transition: all 0.15s;">
+          <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
             <div style="font-weight: 800; color: #1e293b;">${item.name}</div>
             <div style="font-size: 11px; color: #64748b; font-weight: normal; margin-top: 2px;">(${optionsText})</div>
           </td>
-          <td style="text-align: center;">${item.quantity}</td>
-          <td style="text-align: left;">${(item.price * item.quantity).toFixed(2)} ر.س</td>
+          <td style="text-align: center; padding: 12px; border-bottom: 1px solid #e2e8f0; font-weight: 900; color: #4f46e5;">
+            <span style="background: #e0e7ff; padding: 4px 8px; border-radius: 8px;">${group.totalQty}</span>
+            <div class="no-print" style="font-size: 8px; color: #94a3b8; font-weight: normal; margin-top: 2px;">(اضغط للتفاصيل)</div>
+          </td>
+          <td style="text-align: left; padding: 12px; border-bottom: 1px solid #e2e8f0; font-weight: 800; color: #1e293b;">${(group.totalPrice).toFixed(2)} ر.س</td>
         </tr>
+        <tbody id="print-detail-${idx}" class="no-print" style="display: none; background: #f8fafc;">
+          ${group.originalItems.map((orig, subIdx) => `
+            <tr>
+              <td style="padding: 8px 24px; font-size: 13px; color: #475569; font-weight: 600;">◀ قطعة ${subIdx + 1}: ${orig.name}</td>
+              <td style="text-align: center; padding: 8px; font-size: 13px; color: #475569;">1</td>
+              <td style="text-align: left; padding: 8px 12px; font-size: 13px; color: #475569; font-weight: 600;">${orig.price.toFixed(2)} ر.س</td>
+            </tr>
+          `).join('')}
+        </tbody>
       `;
     }).join('');
 
@@ -1992,7 +2082,14 @@ const App: React.FC = () => {
   };
 
   const filteredOrders = useMemo(() => {
-    return orders.filter(o => {
+    // Prevent duplicate order records in list
+    const uniqueMap = new Map<string, Order>();
+    orders.forEach(o => {
+      if (o && o.id) uniqueMap.set(o.id, o);
+    });
+    const uniqueOrders = Array.from(uniqueMap.values());
+
+    return uniqueOrders.filter(o => {
       const matchesSearch = o.customer_name.toLowerCase().includes(searchQuery.toLowerCase()) || 
                            o.order_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
                            o.customer_phone.includes(searchQuery);
@@ -2136,6 +2233,19 @@ const App: React.FC = () => {
                           <span className="text-sm font-black mb-1">{item.name}</span>
                           {isEditingPrices ? (
                             <div className="mt-2 w-full space-y-2" onClick={e => e.stopPropagation()}>
+                              <div className="flex items-center justify-between gap-1 text-[10px] font-black text-slate-500">
+                                <span className="shrink-0">عادي:</span>
+                                <input 
+                                  type="number" 
+                                  step="0.5"
+                                  className="w-16 bg-slate-50 text-center font-black text-xs text-slate-755 outline-none border border-slate-200 rounded p-1 text-right" 
+                                  value={getItemPrices(item).price_normal} 
+                                  onChange={(e) => {
+                                    const val = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                                    updateCategoryCustomPrice(idx, 'price', isNaN(val) ? 0 : val);
+                                  }} 
+                                />
+                              </div>
                               <div className="flex items-center justify-between gap-1 text-[10px] font-black text-red-600">
                                 <span className="shrink-0">مستعجل:</span>
                                 <input 
@@ -2299,12 +2409,24 @@ const App: React.FC = () => {
                     
                     <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
                       {/* Independent Option Selectors */}
-                      <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-100/80 rounded-xl">
+                      <div className="grid grid-cols-3 gap-1 p-0.5 bg-slate-100/80 rounded-xl">
                         <button
                           type="button"
                           onClick={() => {
-                            const isUrgent = item.is_urgent || item.service_type === 'مستعجل' || false;
-                            updateItemOption(item.id, 'urgent', !isUrgent);
+                            updateItemMode(item.id, 'عادي');
+                          }}
+                          className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
+                            item.is_normal
+                              ? 'bg-slate-500 text-white shadow-sm'
+                              : 'text-slate-500 hover:bg-white/50 bg-transparent'
+                          }`}
+                        >
+                          عادي
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateItemMode(item.id, 'مستعجل');
                           }}
                           className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
                             (item.is_urgent || item.service_type === 'مستعجل')
@@ -2317,8 +2439,7 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => {
-                            const isIroning = item.is_ironing_only || false;
-                            updateItemOption(item.id, 'ironing', !isIroning);
+                            updateItemMode(item.id, 'كوي');
                           }}
                           className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
                             item.is_ironing_only
@@ -2330,8 +2451,20 @@ const App: React.FC = () => {
                         </button>
                       </div>
 
-                      {/* Custom Price Inputs for مستعجل and كوي */}
-                      <div className="grid grid-cols-2 gap-1.5 text-[8.5px] font-bold text-slate-400 mt-1">
+                      {/* Custom Price Inputs for عادي / مستعجل / كوي */}
+                      <div className="grid grid-cols-3 gap-1.5 text-[8.5px] font-bold text-slate-400 mt-1">
+                        <div className="flex flex-col gap-1 text-center">
+                          <span className="text-slate-500 font-black">عادي</span>
+                          <div className="flex items-center bg-white border border-slate-200 rounded-lg p-1">
+                            <input 
+                              type="number" 
+                              step="0.5"
+                              className="w-full text-center font-black text-[9px] outline-none text-slate-700 bg-transparent"
+                              value={getItemPrices(item).price_normal}
+                              onChange={e => updateItemCustomPrice(item.id, 'normal', parseFloat(e.target.value) || 0)}
+                            />
+                          </div>
+                        </div>
                         <div className="flex flex-col gap-1 text-center">
                           <span className="text-red-500 font-black">مستعجل</span>
                           <div className="flex items-center bg-white border border-slate-200 rounded-lg p-1">
@@ -2345,7 +2478,7 @@ const App: React.FC = () => {
                           </div>
                         </div>
                         <div className="flex flex-col gap-1 text-center">
-                          <span className="text-indigo-600">كوي</span>
+                          <span className="text-indigo-600 font-black">كوي</span>
                           <div className="flex items-center bg-white border border-slate-200 rounded-lg p-1">
                             <input 
                               type="number" 
@@ -2422,29 +2555,54 @@ const App: React.FC = () => {
                    <p className="text-sm font-bold text-indigo-500 mb-6">{order.customer_phone}</p>
                    {/* Items treatment options details block */}
                    <div className="space-y-1.5 mb-6 text-xs font-bold text-slate-600 bg-slate-50 p-4 rounded-3xl border border-slate-100/50">
-                     {order.items && order.items.map((item, idx) => {
-                       const optText = [
-                         item.service_type || 'عادي',
-                         item.is_ironing_only ? 'كوي' : ''
-                       ].filter(Boolean).join(' - ');
-                       
-                       return (
-                         <div key={idx} className="flex justify-between items-center text-[11px] gap-2 pt-1 border-b border-dashed border-slate-100 last:border-0 last:pb-0 first:pt-0">
-                           <span>
-                             {item.name} <span className="text-slate-400 font-normal">x{item.quantity}</span>
-                             <span className="text-[9px] text-slate-400 font-normal block">({(() => {
-                               const opts: string[] = [];
-                               if (item.service_type === 'مستعجل' || (item as any).is_urgent) opts.push('مستعجل 🔥');
-                               if (item.is_ironing_only) opts.push('كوي');
-                               if ((item as any).is_no_ironing || item.ironing_type === 'بدون كوي') opts.push('بدون كوي');
-                               if (opts.length === 0) opts.push('عادي');
-                               return opts.join(' + ');
-                             })()})</span>
-                           </span>
-                           <span className="font-mono text-slate-500">{(item.price * item.quantity).toFixed(2)} ر.س</span>
-                         </div>
-                       );
-                     })}
+                     {(() => {
+                       const groups = getGroupedItems(order.items || []);
+                       return groups.map((group) => {
+                         const isExpanded = expandedGroups[`${order.id}_${group.key}`];
+                         const optText = (() => {
+                           const opts: string[] = [];
+                           if (group.item.service_type === 'مستعجل' || (group.item as any).is_urgent) opts.push('مستعجل 🔥');
+                           if (group.item.is_ironing_only) opts.push('كوي');
+                           if ((group.item as any).is_no_ironing || group.item.ironing_type === 'بدون كوي') opts.push('بدون كوي');
+                           if (opts.length === 0) opts.push('عادي');
+                           return opts.join(' + ');
+                         })();
+
+                         return (
+                           <div key={group.key} className="border-b border-dashed border-slate-100 last:border-0 pb-1.5 last:pb-0 first:pt-0 pt-1.5 text-right">
+                             {/* Group Header Row */}
+                             <div 
+                               onClick={() => toggleExpandGroup(order.id, group.key)}
+                               className="flex justify-between items-center cursor-pointer hover:bg-slate-100/60 p-1 rounded-xl transition-all select-none"
+                             >
+                               <span className="flex items-center gap-1.5 text-[11px] font-black">
+                                 <span>{group.item.name}</span>
+                                 <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">x{group.totalQty}</span>
+                                 <span className="text-[10px] text-slate-400 font-normal font-sans">({optText})</span>
+                                </span>
+                                <div className="flex items-center gap-1.5 font-sans">
+                                  <span className="font-mono text-slate-500 text-[11.5px] font-bold">{group.totalPrice.toFixed(2)} ر.س</span>
+                                  <span className="text-[10px] text-indigo-400 font-bold transition-transform duration-200" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+                                    ▼
+                                  </span>
+                                </div>
+                             </div>
+                             
+                             {/* Expanded Individual Items List */}
+                             {isExpanded && (
+                               <div className="mt-1.5 mr-3 pr-3 border-r-2 border-indigo-100 space-y-1 text-right">
+                                 {group.originalItems.map((orig, subIdx) => (
+                                   <div key={subIdx} className="flex justify-between items-center text-[10px] text-slate-500 font-bold bg-white/40 p-1 px-2 rounded-lg">
+                                     <span>قطعة {subIdx + 1} - {orig.name}</span>
+                                     <span>{orig.price.toFixed(2)} ر.س</span>
+                                   </div>
+                                 ))}
+                               </div>
+                             )}
+                           </div>
+                         );
+                       });
+                     })()}
                      {order.items && order.items[0] && (order.items[0] as any).discount_percent > 0 && (
                        <div className="pt-2 mt-2 border-t border-slate-200 flex justify-between text-red-500 text-[10px] font-black">
                          <span>خصم ({(order.items[0] as any).discount_percent}%)</span>
@@ -3287,26 +3445,33 @@ const App: React.FC = () => {
                     type="number" 
                     placeholder="السعر الرئيسي" 
                     className="w-full px-5 py-4 bg-indigo-50/50 border border-indigo-100 rounded-2xl outline-none font-black text-indigo-700 text-right" 
-                    value={customItemForm.price_normal === 0 ? '0' : (customItemForm.price_normal || '')} 
+                    value={customItemForm.price === 0 ? '0' : (customItemForm.price || '')} 
                     onChange={e => {
                       const val = e.target.value === '' ? 0 : (parseFloat(e.target.value) || 0);
                       setCustomItemForm({
                         ...customItemForm, 
-                        price_normal: val,
-                        price_urgent: val * 2,
-                        price_ironing: val * 0.5,
-                        price_no_ironing: val * 0.8
+                        price: val
                       });
                     }} 
                   />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 block mb-1 text-center">عادي</label>
+                    <input 
+                      type="number" 
+                      step="0.5"
+                      className="w-full px-2 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none font-black text-center text-slate-700 font-bold" 
+                      value={customItemForm.price_normal === 0 ? '0' : (customItemForm.price_normal || '')} 
+                      onChange={e => setCustomItemForm({...customItemForm, price_normal: e.target.value === '' ? 0 : (parseFloat(e.target.value) || 0)})} 
+                    />
+                  </div>
                   <div>
                     <label className="text-[10px] font-black text-red-500 block mb-1 text-center">مستعجل 🔥</label>
                     <input 
                       type="number" 
                       step="0.5"
-                      className="w-full px-3 py-3 bg-red-50/20 border border-red-100 rounded-xl outline-none font-black text-center text-red-600" 
+                      className="w-full px-2 py-3 bg-red-50/20 border border-red-100 rounded-xl outline-none font-black text-center text-red-600" 
                       value={customItemForm.price_urgent === 0 ? '0' : (customItemForm.price_urgent || '')} 
                       onChange={e => setCustomItemForm({...customItemForm, price_urgent: e.target.value === '' ? 0 : (parseFloat(e.target.value) || 0)})} 
                     />
@@ -3316,7 +3481,7 @@ const App: React.FC = () => {
                     <input 
                       type="number" 
                       step="0.5"
-                      className="w-full px-3 py-3 bg-indigo-50/20 border border-indigo-100 rounded-xl outline-none font-black text-center text-indigo-600" 
+                      className="w-full px-2 py-3 bg-indigo-50/20 border border-indigo-100 rounded-xl outline-none font-black text-center text-indigo-600" 
                       value={customItemForm.price_ironing === 0 ? '0' : (customItemForm.price_ironing || '')} 
                       onChange={e => setCustomItemForm({...customItemForm, price_ironing: e.target.value === '' ? 0 : (parseFloat(e.target.value) || 0)})} 
                     />
@@ -3870,12 +4035,24 @@ const App: React.FC = () => {
 
                           <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
                             {/* Option Selector checkboxes in row */}
-                            <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-100/90 rounded-xl">
+                            <div className="grid grid-cols-3 gap-1 p-0.5 bg-slate-100/90 rounded-xl">
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const isUrgent = item.is_urgent || item.service_type === 'مستعجل' || false;
-                                  updateEditItemOption(item.id, 'urgent', !isUrgent);
+                                  updateEditItemMode(item.id, 'عادي');
+                                }}
+                                className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
+                                  item.is_normal
+                                    ? 'bg-slate-500 text-white shadow-sm font-bold'
+                                    : 'text-slate-500 hover:bg-white/50 bg-transparent'
+                                }`}
+                              >
+                                عادي
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  updateEditItemMode(item.id, 'مستعجل');
                                 }}
                                 className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
                                   (item.is_urgent || item.service_type === 'مستعجل')
@@ -3888,8 +4065,7 @@ const App: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const isIroning = item.is_ironing_only || false;
-                                  updateEditItemOption(item.id, 'ironing', !isIroning);
+                                  updateEditItemMode(item.id, 'كوي');
                                 }}
                                 className={`py-1.5 text-[10px] font-black rounded-lg transition-all ${
                                   item.is_ironing_only
@@ -3902,7 +4078,19 @@ const App: React.FC = () => {
                             </div>
 
                             {/* Custom prices inputs */}
-                            <div className="grid grid-cols-2 gap-1.5 text-[8.5px] font-bold text-slate-400 mt-1">
+                            <div className="grid grid-cols-3 gap-1.5 text-[8.5px] font-bold text-slate-400 mt-1">
+                              <div className="flex flex-col gap-1 text-center font-bold">
+                                <span className="text-slate-500 font-black">عادي</span>
+                                <div className="flex items-center bg-white border border-slate-200 rounded-lg p-1">
+                                  <input 
+                                    type="number" 
+                                    step="0.5"
+                                    className="w-full text-center font-black text-[9px] outline-none text-slate-700 bg-transparent"
+                                    value={getItemPrices(item).price_normal}
+                                    onChange={e => updateEditItemCustomPrice(item.id, 'normal', parseFloat(e.target.value) || 0)}
+                                  />
+                                </div>
+                              </div>
                               <div className="flex flex-col gap-1 text-center font-bold">
                                 <span className="text-red-500 font-black">مستعجل</span>
                                 <div className="flex items-center bg-white border border-slate-200 rounded-lg p-1">
@@ -4081,9 +4269,53 @@ const App: React.FC = () => {
                 <div className="flex justify-between items-center text-xs"><span>التاريخ:</span><span className="font-bold">{new Date(showPrintModal.created_at).toLocaleString('ar-SA')}</span></div>
               </div>
               <div className="space-y-4 mb-10 text-right">
-                {showPrintModal.items.map(item => (
-                  <div key={item.id} className="flex justify-between items-center text-sm"><span>{item.name} x{item.quantity}</span><span>{(item.price * item.quantity).toFixed(2)} ر.س</span></div>
-                ))}
+                {(() => {
+                  const groups = getGroupedItems(showPrintModal.items || []);
+                  return groups.map((group) => {
+                    const groupKey = `printmodal_${group.key}`;
+                    const isExpanded = expandedGroups[groupKey];
+                    const optText = (() => {
+                      const opts: string[] = [];
+                      if (group.item.service_type === 'مستعجل' || (group.item as any).is_urgent) opts.push('مستعجل 🔥');
+                      if (group.item.is_ironing_only) opts.push('كوي');
+                      if ((group.item as any).is_no_ironing || group.item.ironing_type === 'بدون كوي') opts.push('بدون كوي');
+                      if (opts.length === 0) opts.push('عادي');
+                      return opts.join(' + ');
+                    })();
+
+                    return (
+                      <div key={group.key} className="border-b border-slate-100 last:border-0 pb-3">
+                        <div 
+                          onClick={() => toggleExpandGroup('printmodal', group.key)}
+                          className="flex justify-between items-center text-sm font-black cursor-pointer hover:bg-slate-50 p-1.5 rounded-xl transition-all select-none"
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <span>{group.item.name}</span>
+                            <span className="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-full text-xs font-black font-mono">x{group.totalQty}</span>
+                            <span className="text-[10px] text-slate-400 font-normal">({optText})</span>
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span>{(group.totalPrice).toFixed(2)} ر.س</span>
+                            <span className="text-[11px] text-indigo-500 font-bold transition-transform duration-200" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+                              ▼
+                            </span>
+                          </div>
+                        </div>
+
+                        {isExpanded && (
+                          <div className="mt-2 mr-3 pr-3 border-r-2 border-indigo-100 space-y-1 text-right">
+                            {group.originalItems.map((orig, subIdx) => (
+                              <div key={subIdx} className="flex justify-between items-center text-xs text-slate-500 font-bold bg-slate-100/40 p-1.5 px-3 rounded-xl">
+                                <span>قطعة {subIdx + 1} - {orig.name}</span>
+                                <span>{orig.price.toFixed(2)} ر.س</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
               <div className="bg-slate-50 p-8 rounded-[2.5rem] border mb-6"><div className="flex justify-between text-2xl font-black pt-4"><span>الإجمالي</span><span className="text-indigo-600">{showPrintModal.total.toFixed(2)} ر.س</span></div></div>
               <div className="text-[10px] text-slate-400 font-bold mb-8 leading-relaxed text-center">

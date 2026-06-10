@@ -25,6 +25,8 @@ export interface LaundryItem {
   price_urgent?: number;
   price_ironing?: number;
   price_no_ironing?: number;
+  base_price?: number;
+  is_normal?: boolean;
 }
 
 export interface Order {
