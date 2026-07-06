@@ -39,7 +39,8 @@ import {
   Zap,
   Gift,
   CreditCard,
-  UserPlus
+  UserPlus,
+  Edit2
 } from 'lucide-react';
 import { Order, InventoryItem, OrderType, OrderStatus, LaundryItem, PaymentMethod, TwilioConfig, UserProfile, UserRole, Subscription, Offer, SubscriptionPackage } from './types';
 import { BarcodeGenerator } from './components/BarcodeGenerator';
@@ -278,6 +279,7 @@ const App: React.FC = () => {
   const [financeFromDate, setFinanceFromDate] = useState<string>('');
   const [financeToDate, setFinanceToDate] = useState<string>('');
   const [financeSelectedClientPhone, setFinanceSelectedClientPhone] = useState<string>('all');
+  const [financePendingFilter, setFinancePendingFilter] = useState<'all' | 'has_pending' | 'no_pending'>('all');
   const [financeClientSearch, setFinanceClientSearch] = useState<string>('');
 
   const uniqueClients = useMemo(() => {
@@ -617,7 +619,8 @@ const App: React.FC = () => {
   const [newInvItem, setNewInvItem] = useState({ name: '', stock: 0, unit: 'قطعة', threshold: 5 });
   const [showPackageModal, setShowPackageModal] = useState(false);
   const [showAssignSubModal, setShowAssignSubModal] = useState<{ name: string, phone: string } | null>(null);
-  const [packageForm, setPackageForm] = useState({ name: '', total_items: 0, price: 0, duration_days: 30 });
+  const [packageForm, setPackageForm] = useState({ name: '', total_items: 0, price: 0, duration_days: 30, discount_percent: 0 });
+  const [editingPackageId, setEditingPackageId] = useState<string | null>(null);
   
   const scanIntervalRef = useRef<number | null>(null);
 
@@ -834,7 +837,23 @@ const App: React.FC = () => {
 
       const { data: pkgsData, error: pkgsError } = await supabase.from('subscription_packages').select('*');
       if (pkgsError) throw pkgsError;
-      if (pkgsData && pkgsData.length > 0) setSubscriptionPackages(pkgsData);
+      if (pkgsData && pkgsData.length > 0) {
+        const parsedPkgs = pkgsData.map((pkg: any) => {
+          let discount_percent = 0;
+          let cleanName = pkg.name;
+          if (pkg.name && pkg.name.includes(' __dp:')) {
+            const parts = pkg.name.split(' __dp:');
+            cleanName = parts[0];
+            discount_percent = parseInt(parts[1], 10) || 0;
+          }
+          return {
+            ...pkg,
+            name: cleanName,
+            discount_percent
+          };
+        });
+        setSubscriptionPackages(parsedPkgs);
+      }
 
       console.log("Fetching categories custom prices from Supabase...");
       let latestCustomPrices: Record<string, any> = {};
@@ -986,19 +1005,81 @@ const App: React.FC = () => {
 
   const handleCreatePackage = async () => {
     if (!packageForm.name || packageForm.total_items <= 0 || packageForm.price <= 0) return alert('يرجى إدخال بيانات صحيحة');
-    const newPkg: SubscriptionPackage = {
-      id: Math.random().toString(36).substr(2, 9),
-      ...packageForm
-    };
     
+    if (editingPackageId) {
+      // Editing existing package
+      const dbPkg = {
+        name: `${packageForm.name} __dp:${packageForm.discount_percent || 0}`,
+        total_items: packageForm.total_items,
+        price: packageForm.price,
+        duration_days: packageForm.duration_days
+      };
+      
+      try {
+        const { error } = await supabase.from('subscription_packages').update(dbPkg).eq('id', editingPackageId);
+        if (error) throw error;
+        
+        setSubscriptionPackages(subscriptionPackages.map(p => p.id === editingPackageId ? {
+          id: editingPackageId,
+          ...packageForm
+        } : p));
+        
+        setPackageForm({ name: '', total_items: 0, price: 0, duration_days: 30, discount_percent: 0 });
+        setEditingPackageId(null);
+        setShowPackageModal(false);
+        alert('تم تعديل الباقة بنجاح ✅');
+      } catch (e: any) {
+        alert(`فشل التعديل: ${e.message}`);
+      }
+    } else {
+      // Creating a new package
+      const newPkg: SubscriptionPackage = {
+        id: Math.random().toString(36).substr(2, 9),
+        ...packageForm
+      };
+      
+      // Prepare database package object with encoded discount in name
+      const dbPkg = {
+        id: newPkg.id,
+        name: `${newPkg.name} __dp:${newPkg.discount_percent || 0}`,
+        total_items: newPkg.total_items,
+        price: newPkg.price,
+        duration_days: newPkg.duration_days
+      };
+      
+      try {
+        const { error } = await supabase.from('subscription_packages').insert([dbPkg]);
+        if (error) throw error;
+        setSubscriptionPackages([...subscriptionPackages, newPkg]);
+        setPackageForm({ name: '', total_items: 0, price: 0, duration_days: 30, discount_percent: 0 });
+        setShowPackageModal(false);
+      } catch (e: any) {
+        alert(`فشل الحفظ: ${e.message}`);
+      }
+    }
+  };
+
+  const handleStartEditPackage = (pkg: SubscriptionPackage) => {
+    setEditingPackageId(pkg.id);
+    setPackageForm({
+      name: pkg.name,
+      total_items: pkg.total_items,
+      price: pkg.price,
+      duration_days: pkg.duration_days,
+      discount_percent: pkg.discount_percent || 0
+    });
+    setShowPackageModal(true);
+  };
+
+  const handleDeletePackage = async (id: string) => {
+    if (!window.confirm('هل أنت متأكد من حذف هذه الباقة؟')) return;
     try {
-      const { error } = await supabase.from('subscription_packages').insert([newPkg]);
+      const { error } = await supabase.from('subscription_packages').delete().eq('id', id);
       if (error) throw error;
-      setSubscriptionPackages([...subscriptionPackages, newPkg]);
-      setPackageForm({ name: '', total_items: 0, price: 0, duration_days: 30 });
-      setShowPackageModal(false);
+      setSubscriptionPackages(subscriptionPackages.filter(p => p.id !== id));
+      alert('تم حذف الباقة بنجاح ✅');
     } catch (e: any) {
-      alert(`فشل الحفظ: ${e.message}`);
+      alert(`فشل الحذف: ${e.message}`);
     }
   };
 
@@ -1110,6 +1191,9 @@ const App: React.FC = () => {
     }
   };
 
+  const [useSubscription, setUseSubscription] = useState<boolean>(true);
+  const [selectedOrderPackageId, setSelectedOrderPackageId] = useState<string>('');
+
   const [newOrder, setNewOrder] = useState<{
     customer_name: string;
     customer_phone: string;
@@ -1134,15 +1218,54 @@ const App: React.FC = () => {
     discount_percent: 0
   });
 
-  // Auto-select subscription if available
+  // Auto-select subscription and apply automatic package discount if available
   useEffect(() => {
     if (newOrder.customer_phone.length >= 9) {
       const sub = getCustomerSubscription(newOrder.customer_phone);
-      if (sub && !newOrder.is_free && newOrder.payment_method === 'Cash' && !newOrder.is_paid) {
-        setNewOrder(prev => ({ ...prev, is_paid: true, payment_method: 'Subscription' }));
-      }
+      const activePkgId = sub ? sub.package_id : selectedOrderPackageId;
+      const pkg = activePkgId ? subscriptionPackages.find(p => p.id === activePkgId) : null;
+      const hasSubOrNewPkg = !!sub || !!selectedOrderPackageId;
+      const autoDiscount = (hasSubOrNewPkg && useSubscription && pkg && pkg.discount_percent) ? pkg.discount_percent : 0;
+
+      setNewOrder(prev => {
+        let updated = false;
+        const updates: any = {};
+        
+        if (hasSubOrNewPkg && useSubscription) {
+          if (!prev.is_free && prev.payment_method !== 'Subscription') {
+            updates.is_paid = true;
+            updates.payment_method = 'Subscription';
+            updated = true;
+          }
+        } else {
+          // If customer has a subscription but use_subscription is toggled OFF, reset payment method from 'Subscription' to 'Cash'
+          if (prev.payment_method === 'Subscription') {
+            updates.is_paid = false;
+            updates.payment_method = 'Cash';
+            updated = true;
+          }
+        }
+        
+        if (prev.discount_percent !== autoDiscount) {
+          updates.discount_percent = autoDiscount;
+          updated = true;
+        }
+
+        if (updated) {
+          return { ...prev, ...updates };
+        }
+        return prev;
+      });
+    } else {
+      // Clear auto-applied discount if phone number is cleared
+      setNewOrder(prev => {
+        if (prev.discount_percent > 0 || prev.payment_method === 'Subscription') {
+          return { ...prev, discount_percent: 0, payment_method: 'Cash', is_paid: false };
+        }
+        return prev;
+      });
     }
-  }, [newOrder.customer_phone, subscriptions]);
+  }, [newOrder.customer_phone, useSubscription, selectedOrderPackageId, subscriptions, subscriptionPackages]);
 
   const currentSubtotal = useMemo(() => {
     if (newOrder.is_free) return 0;
@@ -1576,29 +1699,55 @@ const App: React.FC = () => {
     setLoading(true);
     const nowISO = new Date().toISOString();
     
-    const orderData = {
-      order_number: `ORD-${Date.now().toString().slice(-5)}`,
-      customer_name: newOrder.customer_name,
-      customer_phone: newOrder.customer_phone,
-      order_type: newOrder.order_type,
-      items: newOrder.items.map(item => ({
-        ...item,
-        discount_percent: newOrder.discount_percent
-      })),
-      subtotal: currentSubtotal,
-      tax: currentTax,
-      total: currentTotal,
-      custom_adjustment: newOrder.custom_adjustment,
-      is_paid: newOrder.is_paid || newOrder.is_free,
-      payment_method: newOrder.is_free ? 'Free' : newOrder.payment_method,
-      status: 'Received',
-      created_at: nowISO,
-      updated_at: nowISO
-    };
-
-    const creatorEmail = userProfile?.email || session?.user?.email || 'unspecified';
-
     try {
+      // Create subscription first if a subscription package is selected and customer has no active sub
+      if (selectedOrderPackageId) {
+        const pkg = subscriptionPackages.find(p => p.id === selectedOrderPackageId);
+        if (pkg) {
+          const expiry = new Date();
+          expiry.setDate(expiry.getDate() + pkg.duration_days);
+
+          const newSub: Subscription = {
+            id: Math.random().toString(36).substr(2, 9),
+            customer_name: newOrder.customer_name,
+            customer_phone: newOrder.customer_phone,
+            package_id: pkg.id,
+            items_remaining: pkg.total_items,
+            total_items: pkg.total_items,
+            expiry_date: expiry.toISOString(),
+            is_active: true
+          };
+
+          const { error: subErr } = await supabase.from('subscriptions').insert([newSub]);
+          if (subErr) throw subErr;
+
+          // Add to local subscriptions state
+          setSubscriptions(prev => [newSub, ...prev]);
+        }
+      }
+
+      const orderData = {
+        order_number: `ORD-${Date.now().toString().slice(-5)}`,
+        customer_name: newOrder.customer_name,
+        customer_phone: newOrder.customer_phone,
+        order_type: newOrder.order_type,
+        items: newOrder.items.map(item => ({
+          ...item,
+          discount_percent: newOrder.discount_percent
+        })),
+        subtotal: currentSubtotal,
+        tax: currentTax,
+        total: currentTotal,
+        custom_adjustment: newOrder.custom_adjustment,
+        is_paid: newOrder.is_paid || newOrder.is_free,
+        payment_method: newOrder.is_free ? 'Free' : newOrder.payment_method,
+        status: 'Received',
+        created_at: nowISO,
+        updated_at: nowISO
+      };
+
+      const creatorEmail = userProfile?.email || session?.user?.email || 'unspecified';
+
       let data, error;
       try {
         const res = await supabase.from('orders').insert([{ ...orderData, created_by: creatorEmail }]).select();
@@ -1666,6 +1815,8 @@ const App: React.FC = () => {
 
         setOrders(prev => [createdOrder, ...prev]);
         setNewOrder({ customer_name: '', customer_phone: '', order_type: 'Normal', items: [], is_paid: false, payment_method: 'Cash', custom_adjustment: 0, is_free: false, is_tax_enabled: true, discount_percent: 0 });
+        setUseSubscription(true);
+        setSelectedOrderPackageId('');
         setActiveTab('orders');
         handlePrintNewPage(createdOrder);
 
@@ -1972,7 +2123,7 @@ const App: React.FC = () => {
         <body>
           <div class="header">
             <div class="logo">M</div>
-            <h1 style="margin: 0; font-size: 28px; font-weight: 900;">مغسلة التميز الذكية</h1>
+            <h1 style="margin: 0; font-size: 28px; font-weight: 900;">مغسلة عود ونظافة</h1>
             <p style="color: #64748b; font-weight: 700; margin-top: 8px;">فاتورة ضريبية مبسطة</p>
           </div>
           
@@ -2342,31 +2493,147 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {getCustomerSubscription(newOrder.customer_phone) && (
-                    <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-emerald-600 shadow-sm">
-                          <CreditCard size={20} />
-                        </div>
-                        <div>
-                          <p className="text-[10px] font-black text-slate-400 uppercase">الرصيد المتبقي</p>
-                            <div className="flex items-center gap-1">
-                              <span className="text-sm font-black text-emerald-700">{getCustomerSubscription(newOrder.customer_phone)?.items_remaining}</span>
-                              <span className="text-xs font-bold text-emerald-600">/ {getCustomerSubscription(newOrder.customer_phone)?.total_items}</span>
+                  {(() => {
+                    const sub = getCustomerSubscription(newOrder.customer_phone);
+                    const selectedPkg = selectedOrderPackageId ? subscriptionPackages.find(p => p.id === selectedOrderPackageId) : null;
+                    
+                    if (sub) {
+                      return (
+                        <>
+                          <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-emerald-600 shadow-sm">
+                                <CreditCard size={20} />
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-black text-slate-400 uppercase">الرصيد المتبقي</p>
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-sm font-black text-emerald-700">{sub.items_remaining}</span>
+                                    <span className="text-xs font-bold text-emerald-600">/ {sub.total_items}</span>
+                                  </div>
+                              </div>
                             </div>
+                            <div className="text-left">
+                              <p className="text-[9px] font-black text-slate-400 uppercase">ينتهي في</p>
+                              <p className="text-[10px] font-bold text-emerald-600">{new Date(sub.expiry_date).toLocaleDateString('ar-SA')}</p>
+                            </div>
+                          </div>
+                          
+                          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                            <label className="text-xs font-black text-slate-500 block">طريقة محاسبة الطلب للعميل المشترك:</label>
+                            <select 
+                              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-xs font-black outline-none focus:ring-2 focus:ring-indigo-500/20 text-right text-slate-700"
+                              value={useSubscription ? "yes" : "no"}
+                              onChange={e => setUseSubscription(e.target.value === "yes")}
+                            >
+                              <option value="yes">خصم من رصيد باقة الاشتراك 🟢</option>
+                              <option value="no">دفع خارجي (نقدي / شبكة / تحويل) 💵</option>
+                            </select>
+                          </div>
+                        </>
+                      );
+                    } else if (selectedPkg) {
+                      return (
+                        <>
+                          <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-amber-600 shadow-sm">
+                                <CreditCard size={20} />
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-black text-slate-400 uppercase">باقة جديدة سيتم تفعيلها</p>
+                                <p className="text-sm font-black text-amber-800">{selectedPkg.name}</p>
+                              </div>
+                            </div>
+                            <div className="text-left">
+                              <p className="text-[9px] font-black text-slate-400 uppercase">سعر الباقة</p>
+                              <p className="text-xs font-black text-amber-700">{selectedPkg.price} ر.س</p>
+                            </div>
+                          </div>
+                          
+                          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                            <label className="text-xs font-black text-slate-500 block">طريقة محاسبة الطلب للعميل المشترك الجديد:</label>
+                            <select 
+                              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-xs font-black outline-none focus:ring-2 focus:ring-indigo-500/20 text-right text-slate-700"
+                              value={useSubscription ? "yes" : "no"}
+                              onChange={e => setUseSubscription(e.target.value === "yes")}
+                            >
+                              <option value="yes">خصم من رصيد الباقة الجديدة 🟢</option>
+                              <option value="no">دفع خارجي (نقدي / شبكة / تحويل) 💵</option>
+                            </select>
+                          </div>
+                        </>
+                      );
+                    } else {
+                      return (
+                        <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 space-y-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-amber-600 shadow-sm">
+                              <CreditCard size={20} />
+                            </div>
+                            <div>
+                              <p className="text-[10px] font-black text-slate-400 uppercase">باقة الاشتراك</p>
+                              <p className="text-sm font-black text-amber-800">لا يوجد اشتراك نشط للعميل</p>
+                            </div>
+                          </div>
+                          <button 
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              setShowAssignSubModal({ name: newOrder.customer_name || 'عميل جديد', phone: newOrder.customer_phone });
+                            }}
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl font-black text-xs transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
+                          >
+                            <PlusCircle size={14} /> تفعيل باقة اشتراك للعميل
+                          </button>
                         </div>
-                      </div>
-                      <div className="text-left">
-                        <p className="text-[9px] font-black text-slate-400 uppercase">ينتهي في</p>
-                        <p className="text-[10px] font-bold text-emerald-600">{new Date(getCustomerSubscription(newOrder.customer_phone)!.expiry_date).toLocaleDateString('ar-SA')}</p>
-                      </div>
-                    </div>
-                  )}
+                      );
+                    }
+                  })()}
                 </div>
               )}
               <div className="space-y-4 mb-6">
                 <div className="relative"><User className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} /><input type="text" placeholder="اسم العميل" className="w-full pr-12 pl-4 py-4 bg-slate-50 border rounded-2xl outline-none font-bold" value={newOrder.customer_name} onChange={e => setNewOrder({...newOrder, customer_name: e.target.value})} /></div>
                 <div className="relative text-left"><Phone className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} /><input type="tel" placeholder="رقم الواتساب" className="w-full pr-12 pl-4 py-4 bg-slate-50 border rounded-2xl outline-none font-bold text-left" dir="ltr" value={newOrder.customer_phone} onChange={e => setNewOrder({...newOrder, customer_phone: e.target.value})} /></div>
+                
+                {/* Always-visible Subscription Package Selector */}
+                <div className="space-y-1 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <label className="text-[10px] font-black text-indigo-600 uppercase flex items-center gap-1">
+                    <CreditCard size={12} /> باقة الاشتراك للعميل (اختياري)
+                  </label>
+                  {(() => {
+                    const sub = getCustomerSubscription(newOrder.customer_phone);
+                    if (sub) {
+                      const pkg = subscriptionPackages.find(p => p.id === sub.package_id);
+                      return (
+                        <div className="text-xs font-black text-emerald-600 pt-1 flex items-center gap-1.5">
+                          <span>🟢 العميل مسجل في باقة: <strong>{pkg?.name || 'باقة نشطة'}</strong> (رصيد: {sub.items_remaining} قطعة)</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <select 
+                        className="w-full px-3 py-3 bg-white border rounded-xl outline-none font-black text-xs text-right text-slate-700 focus:ring-2 focus:ring-indigo-500/20"
+                        value={selectedOrderPackageId}
+                        onChange={e => {
+                          const pkgId = e.target.value;
+                          setSelectedOrderPackageId(pkgId);
+                          if (pkgId) {
+                            setUseSubscription(true);
+                          }
+                        }}
+                      >
+                        <option value="">-- بدون باقة (حساب فردي) --</option>
+                        {subscriptionPackages.map(pkg => (
+                          <option key={pkg.id} value={pkg.id}>
+                            {pkg.name} ({pkg.total_items} قطعة - {pkg.price} ر.س)
+                          </option>
+                        ))}
+                      </select>
+                    );
+                  })()}
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div className="relative"><Banknote className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} /><input type="number" placeholder="تعديل مالي" className="w-full pr-12 pl-4 py-4 bg-indigo-50/50 border rounded-2xl outline-none font-bold text-xs" value={newOrder.custom_adjustment || ''} onChange={e => setNewOrder({...newOrder, custom_adjustment: parseFloat(e.target.value) || 0})} /></div>
                   <div className="relative"><div className="absolute right-4 top-1/2 -translate-y-1/2 font-black text-slate-400 text-sm">%</div><input type="number" min="0" max="100" placeholder="خصم %" className="w-full pr-10 pl-4 py-4 bg-red-50/30 border border-red-100 rounded-2xl outline-none font-bold text-xs" value={newOrder.discount_percent || ''} onChange={e => setNewOrder({...newOrder, discount_percent: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0))})} /></div>
@@ -2518,7 +2785,7 @@ const App: React.FC = () => {
                       <select className="bg-white/10 border border-white/10 rounded-xl py-3 px-3 text-xs font-black text-white" value={newOrder.payment_method} onChange={e => setNewOrder({...newOrder, payment_method: e.target.value as any})}>
                         <option value="Cash" className="text-black">نقدي</option>
                         <option value="Card" className="text-black">شبكة</option>
-                        {getCustomerSubscription(newOrder.customer_phone) && (
+                        {getCustomerSubscription(newOrder.customer_phone) && useSubscription && (
                           <option value="Subscription" className="text-black">من الاشتراك</option>
                         )}
                       </select>
@@ -2741,7 +3008,24 @@ const App: React.FC = () => {
                     <ul className="space-y-3 mb-8 text-sm font-medium">
                       <li className="flex items-center gap-2"><Check size={16} className="text-indigo-400" /> غسيل وكي</li>
                       <li className="flex items-center gap-2"><Check size={16} className="text-indigo-400" /> صالحة لمدة {pkg.duration_days} يوم</li>
+                      {pkg.discount_percent !== undefined && pkg.discount_percent > 0 && (
+                        <li className="flex items-center gap-2 text-emerald-300 font-bold"><Check size={16} className="text-emerald-300" /> خصم إضافي {pkg.discount_percent}% للطلبات</li>
+                      )}
                     </ul>
+                    <div className="flex justify-between items-center gap-3 mt-6 pt-4 border-t border-white/10 relative z-10">
+                      <button 
+                        onClick={() => handleStartEditPackage(pkg)} 
+                        className="flex-1 py-2 px-3 bg-white/15 hover:bg-white/25 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <Edit2 size={12} /> تعديل
+                      </button>
+                      <button 
+                        onClick={() => handleDeletePackage(pkg.id)} 
+                        className="flex-1 py-2 px-3 bg-red-500/20 hover:bg-red-500/40 text-red-200 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <Trash2 size={12} /> حذف
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2907,12 +3191,13 @@ const App: React.FC = () => {
                 </div>
                 
                 {/* Reset button if filter is active */}
-                {(financeFromDate || financeToDate || financeSelectedClientPhone !== 'all') && (
+                {(financeFromDate || financeToDate || financeSelectedClientPhone !== 'all' || financePendingFilter !== 'all') && (
                   <button
                     onClick={() => {
                       setFinanceFromDate('');
                       setFinanceToDate('');
                       setFinanceSelectedClientPhone('all');
+                      setFinancePendingFilter('all');
                     }}
                     className="self-end md:self-auto py-2 px-4 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded-xl text-xs font-black transition-all flex items-center gap-1.5"
                   >
@@ -2922,7 +3207,7 @@ const App: React.FC = () => {
               </div>
 
               {/* Filter inputs grid */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mt-8">
                 
                 {/* From Date */}
                 <div className="space-y-2">
@@ -2960,6 +3245,20 @@ const App: React.FC = () => {
                         {c.name} ({c.phone})
                       </option>
                     ))}
+                  </select>
+                </div>
+
+                {/* Pending Amount Status Filter */}
+                <div className="space-y-2">
+                  <label className="text-xs font-black text-slate-500 block">تصفية حسب مبالغ معلقة 💰</label>
+                  <select
+                    value={financePendingFilter}
+                    onChange={(e) => setFinancePendingFilter(e.target.value as any)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-sm text-right focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/5 transition-all text-slate-700 font-bold"
+                  >
+                    <option value="all">جميع الحالات (الكل)</option>
+                    <option value="has_pending">عملاء لديهم مبالغ معلقة 🔴</option>
+                    <option value="no_pending">عملاء بدون مبالغ معلقة 🟢</option>
                   </select>
                 </div>
 
@@ -3098,6 +3397,8 @@ const App: React.FC = () => {
                {/* Clients table */}
                {(() => {
                  const searchedClients = financeStats.clientList.filter(c => {
+                   if (financePendingFilter === 'has_pending' && c.pendingSpent <= 0) return false;
+                   if (financePendingFilter === 'no_pending' && c.pendingSpent > 0) return false;
                    if (!financeClientSearch.trim()) return true;
                    const query = financeClientSearch.toLowerCase();
                    return c.name.toLowerCase().includes(query) || c.phone.includes(query);
@@ -3324,8 +3625,17 @@ const App: React.FC = () => {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center z-[200] p-4">
           <div className="bg-white rounded-[3rem] w-full max-w-md p-8 shadow-2xl animate-in zoom-in-95">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-black">إنشاء باقة اشتراك جديدة</h3>
-              <button onClick={() => setShowPackageModal(false)} className="p-2 bg-slate-100 rounded-xl text-slate-500"><X size={20} /></button>
+              <h3 className="text-xl font-black">{editingPackageId ? 'تعديل باقة الاشتراك' : 'إنشاء باقة اشتراك جديدة'}</h3>
+              <button 
+                onClick={() => { 
+                  setShowPackageModal(false); 
+                  setEditingPackageId(null); 
+                  setPackageForm({ name: '', total_items: 0, price: 0, duration_days: 30, discount_percent: 0 }); 
+                }} 
+                className="p-2 bg-slate-100 rounded-xl text-slate-500"
+              >
+                <X size={20} />
+              </button>
             </div>
             <div className="space-y-4">
               <div className="space-y-2">
@@ -3342,9 +3652,15 @@ const App: React.FC = () => {
                   <input type="number" placeholder="150" className="w-full px-5 py-4 bg-slate-50 border rounded-2xl outline-none font-bold" value={packageForm.price || ''} onChange={e => setPackageForm({...packageForm, price: parseFloat(e.target.value) || 0})} />
                 </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-xs font-black text-slate-400 uppercase">المدة (أيام)</label>
-                <input type="number" placeholder="30" className="w-full px-5 py-4 bg-slate-50 border rounded-2xl outline-none font-bold" value={packageForm.duration_days || ''} onChange={e => setPackageForm({...packageForm, duration_days: parseInt(e.target.value) || 0})} />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-black text-slate-400 uppercase">المدة (أيام)</label>
+                  <input type="number" placeholder="30" className="w-full px-5 py-4 bg-slate-50 border rounded-2xl outline-none font-bold" value={packageForm.duration_days || ''} onChange={e => setPackageForm({...packageForm, duration_days: parseInt(e.target.value) || 0})} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-black text-slate-400 uppercase">الخصم (%)</label>
+                  <input type="number" placeholder="0" className="w-full px-5 py-4 bg-slate-50 border rounded-2xl outline-none font-bold" value={packageForm.discount_percent || ''} onChange={e => setPackageForm({...packageForm, discount_percent: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0))})} />
+                </div>
               </div>
               <button onClick={handleCreatePackage} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black mt-4">حفظ الباقة</button>
             </div>
@@ -4261,7 +4577,7 @@ const App: React.FC = () => {
           <div className="bg-white rounded-[3rem] w-full max-w-lg p-10 shadow-2xl relative max-h-[90vh] overflow-y-auto">
             <button onClick={() => setShowPrintModal(null)} className="absolute top-8 left-8 p-3 bg-slate-100 rounded-2xl text-slate-500"><X size={20} /></button>
             <div id="print-area" className="text-center bg-white p-6 rounded-3xl">
-              <div className="mb-8"><div className="w-16 h-16 bg-slate-900 text-white rounded-2xl flex items-center justify-center mx-auto mb-4 text-3xl font-black">M</div><h2 className="text-2xl font-black mb-1">مغسلة التميز الذكية</h2></div>
+              <div className="mb-8"><div className="w-16 h-16 bg-slate-900 text-white rounded-2xl flex items-center justify-center mx-auto mb-4 text-3xl font-black">M</div><h2 className="text-2xl font-black mb-1">مغسلة عود ونظافة</h2></div>
               <div className="border-y border-slate-100 py-6 mb-8 text-right space-y-3">
                 <div className="flex justify-between items-center text-xs"><span>العميل:</span><span className="font-black">{showPrintModal.customer_name}</span></div>
                 <div className="flex justify-between items-center text-xs"><span>رقم الهاتف:</span><span dir="ltr" className="font-bold">{showPrintModal.customer_phone}</span></div>

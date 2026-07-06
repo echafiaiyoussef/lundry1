@@ -65,6 +65,7 @@ export interface SubscriptionPackage {
   total_items: number;
   price: number;
   duration_days: number;
+  discount_percent?: number;
 }
 
 export interface Subscription {
