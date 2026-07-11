@@ -40,7 +40,9 @@ import {
   Gift,
   CreditCard,
   UserPlus,
-  Edit2
+  Edit2,
+  FileSpreadsheet,
+  FileText
 } from 'lucide-react';
 import { Order, InventoryItem, OrderType, OrderStatus, LaundryItem, PaymentMethod, TwilioConfig, UserProfile, UserRole, Subscription, Offer, SubscriptionPackage } from './types';
 import { BarcodeGenerator } from './components/BarcodeGenerator';
@@ -697,6 +699,22 @@ const App: React.FC = () => {
     }
   };
 
+  const handleDeleteUser = async (userId: string) => {
+    if (userId === session?.user?.id) {
+      alert('لا يمكنك حذف حسابك الحالي! ❌');
+      return;
+    }
+    if (!window.confirm('هل أنت متأكد من حذف هذا المستخدم؟')) return;
+    try {
+      const { error } = await supabase.from('profiles').delete().eq('id', userId);
+      if (error) throw error;
+      setProfiles(prev => prev.filter(p => p.id !== userId));
+      alert('تم حذف المستخدم بنجاح ✅');
+    } catch (e: any) {
+      alert(`فشل الحذف: ${e.message}`);
+    }
+  };
+
   const handleLogout = async () => {
     await supabase.auth.signOut();
   };
@@ -1006,6 +1024,10 @@ const App: React.FC = () => {
   const handleCreatePackage = async () => {
     if (!packageForm.name || packageForm.total_items <= 0 || packageForm.price <= 0) return alert('يرجى إدخال بيانات صحيحة');
     
+    if (packageForm.discount_percent === 100) {
+      return alert('لا يمكن إضافة باقة خصم بنسبة 100% ولا يقبلها النظام ❌');
+    }
+    
     if (editingPackageId) {
       // Editing existing package
       const dbPkg = {
@@ -1072,15 +1094,622 @@ const App: React.FC = () => {
   };
 
   const handleDeletePackage = async (id: string) => {
-    if (!window.confirm('هل أنت متأكد من حذف هذه الباقة؟')) return;
+    if (!window.confirm('هل أنت متأكد من حذف هذه الباقة؟ سيتم أيضاً حذف جميع الاشتراكات المرتبطة بها.')) return;
     try {
+      // Delete associated subscriptions first to prevent foreign key constraint violation
+      const { error: subErr } = await supabase.from('subscriptions').delete().eq('package_id', id);
+      if (subErr) throw subErr;
+
       const { error } = await supabase.from('subscription_packages').delete().eq('id', id);
       if (error) throw error;
+
       setSubscriptionPackages(subscriptionPackages.filter(p => p.id !== id));
-      alert('تم حذف الباقة بنجاح ✅');
+      setSubscriptions(prev => prev.filter(sub => sub.package_id !== id));
+      alert('تم حذف الباقة والاشتراكات المرتبطة بها بنجاح ✅');
     } catch (e: any) {
       alert(`فشل الحذف: ${e.message}`);
     }
+  };
+
+  const downloadGeneralExcel = () => {
+    const headers = [
+      'رقم الطلب',
+      'اسم العميل',
+      'رقم الجوال',
+      'نوع الطلب',
+      'المجموع الفرعي',
+      'الضريبة (15%)',
+      'خصم/تعديل',
+      'الإجمالي',
+      'حالة الدفع',
+      'طريقة الدفع',
+      'حالة الطلب',
+      'تاريخ الإنشاء'
+    ];
+    
+    const escapeCSV = (val: any) => {
+      if (val === null || val === undefined) return '';
+      const str = String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const translatePaymentMethod = (method: PaymentMethod) => {
+      switch (method) {
+        case 'Cash': return 'نقدي';
+        case 'Card': return 'شبكة / مدى';
+        case 'Transfer': return 'تحويل بنكي';
+        case 'Subscription': return 'اشتراك';
+        case 'Free': return 'طلب مجاني';
+        default: return method;
+      }
+    };
+
+    const translateOrderStatus = (status: OrderStatus) => {
+      switch (status) {
+        case 'Received': return 'تم الاستلام';
+        case 'Washing': return 'جاري الغسيل';
+        case 'Ironing': return 'جاري الكوي';
+        case 'Ready': return 'جاهز للتسليم';
+        case 'Delivered': return 'تم التسليم';
+        default: return status;
+      }
+    };
+    
+    const rows = filteredFinanceOrders.map(o => [
+      escapeCSV(o.order_number),
+      escapeCSV(o.customer_name),
+      escapeCSV(o.customer_phone),
+      o.order_type === 'Urgent' ? 'مستعجل' : 'عادي',
+      o.subtotal.toFixed(2),
+      o.tax.toFixed(2),
+      o.custom_adjustment.toFixed(2),
+      o.total.toFixed(2),
+      o.is_paid ? 'مدفوع' : 'غير مدفوع',
+      translatePaymentMethod(o.payment_method),
+      translateOrderStatus(o.status),
+      new Date(o.created_at).toLocaleDateString('ar-SA')
+    ]);
+    
+    const csvContent = "\uFEFF" + [
+      [`التقرير المالي العام - مغسلة عود ونظافة`],
+      [`الفترة من: ${financeFromDate || 'البداية'} إلى: ${financeToDate || 'اليوم'}`],
+      [],
+      [`ملخص الفترة:`],
+      [`إجمالي المبيعات المحصلة, ${financeStats.totalRevenue.toFixed(2)} ر.س`],
+      [`الضريبة المحصلة, ${financeStats.taxTotal.toFixed(2)} ر.س`],
+      [`المبالغ المعلقة غير المحصلة, ${financeStats.pendingAmount.toFixed(2)} ر.س`],
+      [`إجمالي عدد الطلبات, ${financeStats.totalOrdersCount}`],
+      [],
+      headers,
+      ...rows
+    ].map(e => e.join(",")).join("\n");
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `التقرير_المالي_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadGeneralPDF = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return alert('يرجى السماح بالنوافذ المنبثقة لتنزيل التقرير ⚠️');
+    
+    const fromStr = financeFromDate ? new Date(financeFromDate).toLocaleDateString('ar-SA') : 'البداية';
+    const toStr = financeToDate ? new Date(financeToDate).toLocaleDateString('ar-SA') : 'اليوم';
+    
+    const translatePaymentMethod = (method: PaymentMethod) => {
+      switch (method) {
+        case 'Cash': return 'نقدي';
+        case 'Card': return 'شبكة / مدى';
+        case 'Transfer': return 'تحويل بنكي';
+        case 'Subscription': return 'اشتراك';
+        case 'Free': return 'طلب مجاني';
+        default: return method;
+      }
+    };
+
+    const htmlContent = `
+      <html dir="rtl" lang="ar">
+      <head>
+        <meta charset="utf-8">
+        <title>تقرير الحسابات المالي</title>
+        <style>
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 40px;
+            color: #333;
+            background-color: #fff;
+          }
+          .header {
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 3px solid #4f46e5;
+            padding-bottom: 20px;
+          }
+          .header h1 {
+            font-size: 28px;
+            color: #1e1b4b;
+            margin: 0;
+          }
+          .header p {
+            font-size: 14px;
+            color: #64748b;
+            margin: 5px 0 0 0;
+            font-weight: bold;
+          }
+          .info-grid {
+            display: grid;
+            grid-template-cols: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 40px;
+          }
+          .info-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            background-color: #f8fafc;
+          }
+          .info-card .title {
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 800;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+          }
+          .info-card .value {
+            font-size: 24px;
+            font-weight: 900;
+          }
+          .value.emerald { color: #059669; }
+          .value.indigo { color: #4f46e5; }
+          .value.red { color: #dc2626; }
+          .payment-breakdown {
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 40px;
+            background-color: #fff;
+          }
+          .payment-breakdown h3 {
+            margin: 0 0 15px 0;
+            font-size: 16px;
+            color: #1e1b4b;
+          }
+          .payment-grid {
+            display: grid;
+            grid-template-cols: repeat(3, 1fr);
+            gap: 15px;
+          }
+          .payment-item {
+            background-color: #f8fafc;
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 14px;
+            font-weight: bold;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 12px;
+          }
+          th, td {
+            border-bottom: 1px solid #e2e8f0;
+            padding: 12px 10px;
+            text-align: right;
+          }
+          th {
+            background-color: #f1f5f9;
+            color: #475569;
+            font-weight: bold;
+          }
+          tr:hover {
+            background-color: #f8fafc;
+          }
+          .footer {
+            margin-top: 50px;
+            text-align: center;
+            font-size: 11px;
+            color: #94a3b8;
+            border-top: 1px solid #e2e8f0;
+            padding-top: 20px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>مغسلة عود ونظافة</h1>
+          <p>التقرير المالي العام للفترة من ${fromStr} إلى ${toStr}</p>
+        </div>
+        
+        <div class="info-grid">
+          <div class="info-card">
+            <div class="title">المبيعات المحصلة</div>
+            <div class="value emerald">${financeStats.totalRevenue.toFixed(2)} ر.س</div>
+          </div>
+          <div class="info-card">
+            <div class="title">الضريبة المحصلة (15%)</div>
+            <div class="value indigo">${financeStats.taxTotal.toFixed(2)} ر.س</div>
+          </div>
+          <div class="info-card">
+            <div class="title">المبالغ المعلقة غير المحصلة</div>
+            <div class="value red">${financeStats.pendingAmount.toFixed(2)} ر.س</div>
+          </div>
+        </div>
+
+        <div class="payment-breakdown">
+          <h3>طرق الدفع والتحصيل للفترة</h3>
+          <div class="payment-grid">
+            <div class="payment-item">نقدي: ${financeStats.cashRevenue.toFixed(2)} ر.س</div>
+            <div class="payment-item">شبكة / مدى: ${financeStats.cardRevenue.toFixed(2)} ر.س</div>
+            <div class="payment-item">تحويل بنكي: ${financeStats.transferRevenue.toFixed(2)} ر.س</div>
+          </div>
+        </div>
+
+        <h3>قائمة تفاصيل مبيعات الطلبات (${filteredFinanceOrders.length} طلب)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>رقم الطلب</th>
+              <th>العميل</th>
+              <th>الجوال</th>
+              <th>نوع الطلب</th>
+              <th>المجموع</th>
+              <th>الضريبة</th>
+              <th>الإجمالي</th>
+              <th>حالة الدفع</th>
+              <th>طريقة الدفع</th>
+              <th>تاريخ الطلب</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredFinanceOrders.map(o => `
+              <tr>
+                <td><strong>${o.order_number}</strong></td>
+                <td>${o.customer_name}</td>
+                <td style="font-family: monospace;">${o.customer_phone}</td>
+                <td>${o.order_type === 'Urgent' ? 'مستعجل' : 'عادي'}</td>
+                <td>${o.subtotal.toFixed(2)} ر.س</td>
+                <td>${o.tax.toFixed(2)} ر.س</td>
+                <td><strong>${o.total.toFixed(2)} ر.س</strong></td>
+                <td><span style="color: ${o.is_paid ? '#059669' : '#dc2626'}; font-weight: bold;">${o.is_paid ? 'مدفوع' : 'غير مدفوع'}</span></td>
+                <td>${translatePaymentMethod(o.payment_method)}</td>
+                <td>${new Date(o.created_at).toLocaleDateString('ar-SA')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+
+        <div class="footer">
+          تم توليد هذا التقرير تلقائياً بتاريخ ${new Date().toLocaleString('ar-SA')} - مغسلة عود ونظافة
+        </div>
+        
+        <script>
+          window.onload = function() {
+            window.print();
+          };
+        </script>
+      </body>
+      </html>
+    `;
+    
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+  };
+
+  const downloadCustomerExcel = (customerPhone: string, customerName: string) => {
+    const customerOrders = orders.filter(o => o.customer_phone === customerPhone);
+    
+    const headers = [
+      'رقم الطلب',
+      'نوع الطلب',
+      'الأصناف والتفاصيل',
+      'المجموع الفرعي',
+      'الضريبة (15%)',
+      'خصم/تعديل',
+      'الإجمالي',
+      'حالة الدفع',
+      'طريقة الدفع',
+      'حالة الطلب',
+      'تاريخ الطلب'
+    ];
+    
+    const escapeCSV = (val: any) => {
+      if (val === null || val === undefined) return '';
+      const str = String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const translatePaymentMethod = (method: PaymentMethod) => {
+      switch (method) {
+        case 'Cash': return 'نقدي';
+        case 'Card': return 'شبكة / مدى';
+        case 'Transfer': return 'تحويل بنكي';
+        case 'Subscription': return 'اشتراك';
+        case 'Free': return 'طلب مجاني';
+        default: return method;
+      }
+    };
+
+    const translateOrderStatus = (status: OrderStatus) => {
+      switch (status) {
+        case 'Received': return 'تم الاستلام';
+        case 'Washing': return 'جاري الغسيل';
+        case 'Ironing': return 'جاري الكوي';
+        case 'Ready': return 'جاهز للتسليم';
+        case 'Delivered': return 'تم التسليم';
+        default: return status;
+      }
+    };
+    
+    const getItemsSummaryString = (items: LaundryItem[]) => {
+      if (!items || items.length === 0) return '-';
+      return items.map(item => `${item.name} (${item.quantity})`).join(' - ');
+    };
+    
+    const rows = customerOrders.map(o => [
+      o.order_number,
+      o.order_type === 'Urgent' ? 'مستعجل' : 'عادي',
+      getItemsSummaryString(o.items),
+      o.subtotal.toFixed(2),
+      o.tax.toFixed(2),
+      o.custom_adjustment.toFixed(2),
+      o.total.toFixed(2),
+      o.is_paid ? 'مدفوع' : 'غير مدفوع',
+      translatePaymentMethod(o.payment_method),
+      translateOrderStatus(o.status),
+      new Date(o.created_at).toLocaleDateString('ar-SA')
+    ]);
+    
+    const totalPaid = customerOrders.filter(o => o.is_paid).reduce((acc, o) => acc + o.total, 0);
+    const totalPending = customerOrders.filter(o => !o.is_paid).reduce((acc, o) => acc + o.total, 0);
+    
+    const csvContent = "\uFEFF" + [
+      [`كشف حساب العميل: ${customerName}`],
+      [`رقم الجوال: ${customerPhone}`],
+      [`تاريخ الاستخراج: ${new Date().toLocaleDateString('ar-SA')}`],
+      [],
+      [`ملخص المبيعات للعميل:`],
+      [`إجمالي المدفوع المحصل, ${totalPaid.toFixed(2)} ر.س`],
+      [`إجمالي المعلق غير المحصل, ${totalPending.toFixed(2)} ر.س`],
+      [`إجمالي عدد الطلبات, ${customerOrders.length}`],
+      [],
+      headers,
+      ...rows
+    ].map(e => e.join(",")).join("\n");
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `كشف_حساب_${customerName}_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadCustomerPDF = (customerPhone: string, customerName: string) => {
+    const customerOrders = orders.filter(o => o.customer_phone === customerPhone);
+    const totalPaid = customerOrders.filter(o => o.is_paid).reduce((acc, o) => acc + o.total, 0);
+    const totalPending = customerOrders.filter(o => !o.is_paid).reduce((acc, o) => acc + o.total, 0);
+    
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return alert('يرجى السماح بالنوافذ المنبثقة لتنزيل التقرير ⚠️');
+    
+    const translatePaymentMethod = (method: PaymentMethod) => {
+      switch (method) {
+        case 'Cash': return 'نقدي';
+        case 'Card': return 'شبكة / مدى';
+        case 'Transfer': return 'تحويل بنكي';
+        case 'Subscription': return 'اشتراك';
+        case 'Free': return 'طلب مجاني';
+        default: return method;
+      }
+    };
+
+    const htmlContent = `
+      <html dir="rtl" lang="ar">
+      <head>
+        <meta charset="utf-8">
+        <title>كشف حساب العميل - ${customerName}</title>
+        <style>
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 40px;
+            color: #333;
+            background-color: #fff;
+          }
+          .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 3px solid #4f46e5;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+          }
+          .header h1 {
+            font-size: 24px;
+            color: #1e1b4b;
+            margin: 0;
+          }
+          .header p {
+            font-size: 14px;
+            color: #64748b;
+            margin: 5px 0 0 0;
+          }
+          .client-info {
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-between;
+          }
+          .client-info h3 {
+            margin: 0 0 5px 0;
+            color: #1e1b4b;
+          }
+          .client-info p {
+            margin: 0;
+            font-size: 13px;
+            color: #475569;
+          }
+          .stats-grid {
+            display: grid;
+            grid-template-cols: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 35px;
+          }
+          .stat-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+            background-color: #f8fafc;
+          }
+          .stat-card .title {
+            font-size: 11px;
+            color: #64748b;
+            font-weight: bold;
+            margin-bottom: 5px;
+          }
+          .stat-card .val {
+            font-size: 20px;
+            font-weight: 900;
+          }
+          .val.green { color: #059669; }
+          .val.red { color: #dc2626; }
+          .val.indigo { color: #4f46e5; }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+          }
+          th, td {
+            border-bottom: 1px solid #e2e8f0;
+            padding: 10px;
+            text-align: right;
+          }
+          th {
+            background-color: #f1f5f9;
+            color: #475569;
+            font-weight: bold;
+          }
+          .items-list {
+            font-size: 10px;
+            color: #64748b;
+            line-height: 1.4;
+          }
+          .footer {
+            margin-top: 50px;
+            text-align: center;
+            font-size: 11px;
+            color: #94a3b8;
+            border-top: 1px solid #e2e8f0;
+            padding-top: 20px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <h1>مغسلة عود ونظافة</h1>
+            <p>كشف حساب العمليات والطلبات التفصيلي</p>
+          </div>
+          <div style="text-align: left;">
+            <p style="font-weight: bold;">تاريخ الطباعة</p>
+            <p>${new Date().toLocaleDateString('ar-SA')}</p>
+          </div>
+        </div>
+
+        <div class="client-info">
+          <div>
+            <h3>العميل: ${customerName}</h3>
+            <p>رقم الجوال: <span style="font-family: monospace;">${customerPhone}</span></p>
+          </div>
+          <div style="text-align: left;">
+            <p>حالة العميل: نشط</p>
+            <p>إجمالي المعاملات: ${customerOrders.length} طلب</p>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="title">إجمالي المبالغ المدفوعة</div>
+            <div class="val green">${totalPaid.toFixed(2)} ر.س</div>
+          </div>
+          <div class="stat-card">
+            <div class="title">إجمالي المبالغ المعلقة</div>
+            <div class="val red">${totalPending.toFixed(2)} ر.س</div>
+          </div>
+          <div class="stat-card">
+            <div class="title">عدد الطلبات</div>
+            <div class="val indigo">${customerOrders.length}</div>
+          </div>
+        </div>
+
+        <h3>تفاصيل الطلبات المسجلة للعميل</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>رقم الطلب</th>
+              <th>نوع الطلب</th>
+              <th>الأصناف والتفاصيل</th>
+              <th>المجموع</th>
+              <th>الضريبة</th>
+              <th>خصم/تعديل</th>
+              <th>الإجمالي</th>
+              <th>حالة الدفع</th>
+              <th>طريقة الدفع</th>
+              <th>التاريخ والوقت</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${customerOrders.map(o => `
+              <tr>
+                <td><strong>${o.order_number}</strong></td>
+                <td>${o.order_type === 'Urgent' ? 'مستعجل' : 'عادي'}</td>
+                <td class="items-list">${o.items.map(item => `${item.name} (${item.quantity})`).join('، ')}</td>
+                <td>${o.subtotal.toFixed(2)} ر.س</td>
+                <td>${o.tax.toFixed(2)} ر.س</td>
+                <td>${o.custom_adjustment.toFixed(2)} ر.س</td>
+                <td><strong>${o.total.toFixed(2)} ر.س</strong></td>
+                <td><span style="color: ${o.is_paid ? '#059669' : '#dc2626'}; font-weight: bold;">${o.is_paid ? 'مدفوع' : 'غير مدفوع'}</span></td>
+                <td>${translatePaymentMethod(o.payment_method)}</td>
+                <td>${new Date(o.created_at).toLocaleDateString('ar-SA')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+
+        <div class="footer">
+          كشف الحساب هذا تم توليده إلكترونياً لعميل مغسلة عود ونظافة
+        </div>
+        
+        <script>
+          window.onload = function() {
+            window.print();
+          };
+        </script>
+      </body>
+      </html>
+    `;
+    
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
   };
 
   const handleAssignSubscription = async (pkgId: string) => {
@@ -3372,17 +4001,35 @@ const App: React.FC = () => {
 
             {/* Client Sales statistics detailed list */}
             <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-slate-100">
-               <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-8 border-b border-slate-50 pb-6">
-                  <div>
-                     <h3 className="text-xl font-black text-slate-800 flex items-center gap-2">
-                        <User className="text-indigo-600" size={22} />
-                        إحصائيات مبيعات العملاء (أعلى تكرار وطلب)
-                     </h3>
-                     <p className="text-xs font-bold text-slate-400 mt-1">قائمة العملاء مع مبيعات واستهلاكات الطلبات للفترة المختارة</p>
+               <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between gap-4 mb-8 border-b border-slate-50 pb-6">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between w-full xl:w-auto gap-4">
+                     <div>
+                        <h3 className="text-xl font-black text-slate-800 flex items-center gap-2">
+                           <User className="text-indigo-600" size={22} />
+                           إحصائيات مبيعات العملاء (أعلى تكرار وطلب)
+                        </h3>
+                        <p className="text-xs font-bold text-slate-400 mt-1">قائمة العملاء مع مبيعات واستهلاكات الطلبات للفترة المختارة</p>
+                     </div>
+                     <div className="flex flex-wrap gap-2.5">
+                        <button
+                           onClick={downloadGeneralExcel}
+                           className="py-2 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 rounded-xl text-xs font-black transition-all flex items-center gap-2 shadow-sm"
+                        >
+                           <FileSpreadsheet size={15} />
+                           تقرير إكسل 📥
+                        </button>
+                        <button
+                           onClick={downloadGeneralPDF}
+                           className="py-2 px-4 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100 rounded-xl text-xs font-black transition-all flex items-center gap-2 shadow-sm"
+                        >
+                           <FileText size={15} />
+                           تقرير PDF 📄
+                        </button>
+                     </div>
                   </div>
                   
                   {/* Search Bar for Clients */}
-                  <div className="relative w-full md:w-80">
+                  <div className="relative w-full xl:w-80">
                      <input
                         type="text"
                         placeholder="ابحث عن العميل بالاسم أو رقم الهاتف..."
@@ -3425,7 +4072,8 @@ const App: React.FC = () => {
                                <th className="pb-4 font-black text-center">باقة الاشتراك 🎟️</th>
                                <th className="pb-4 font-black text-center">الرصيد المتبقي 👚</th>
                                <th className="pb-4 font-black text-center">حالة الصلاحية</th>
-                               <th className="pb-4 font-black text-left">تاريخ آخر معاملة</th>
+                               <th className="pb-4 font-black text-center">تاريخ آخر معاملة</th>
+                               <th className="pb-4 font-black text-left pl-4">تحميل كشف الحساب 📊</th>
                             </tr>
                          </thead>
                          <tbody className="divide-y divide-slate-50/60">
@@ -3490,7 +4138,7 @@ const App: React.FC = () => {
                                         <span className="text-xs text-slate-300 font-bold">-</span>
                                      )}
                                   </td>
-                                  <td className="py-4 text-left text-[11px] text-slate-400">
+                                  <td className="py-4 text-center text-[11px] text-slate-400">
                                      {client.lastOrderDate ? new Date(client.lastOrderDate).toLocaleDateString('ar-SA', {
                                         year: 'numeric',
                                         month: 'long',
@@ -3498,6 +4146,24 @@ const App: React.FC = () => {
                                         hour: '2-digit',
                                         minute: '2-digit'
                                      }) : 'لا توجد طلبات'}
+                                  </td>
+                                  <td className="py-4 text-left pl-4">
+                                     <div className="flex items-center justify-end gap-2">
+                                        <button
+                                           onClick={() => downloadCustomerExcel(client.phone, client.name)}
+                                           title="تنزيل كشف الحساب Excel"
+                                           className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 rounded-xl text-xs transition-all flex items-center justify-center shrink-0 shadow-sm"
+                                        >
+                                           <FileSpreadsheet size={15} />
+                                        </button>
+                                        <button
+                                           onClick={() => downloadCustomerPDF(client.phone, client.name)}
+                                           title="تنزيل كشف الحساب PDF"
+                                           className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100 rounded-xl text-xs transition-all flex items-center justify-center shrink-0 shadow-sm"
+                                        >
+                                           <FileText size={15} />
+                                        </button>
+                                     </div>
                                   </td>
                                </tr>
                             ))}
@@ -3531,6 +4197,7 @@ const App: React.FC = () => {
                       <th className="pb-4 font-black text-slate-400 text-sm">البريد الإلكتروني</th>
                       <th className="pb-4 font-black text-slate-400 text-sm">الصلاحية الحالية</th>
                       <th className="pb-4 font-black text-slate-400 text-sm">تغيير الصلاحية</th>
+                      <th className="pb-4 font-black text-slate-400 text-sm text-left pl-4">إجراءات</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
@@ -3565,6 +4232,16 @@ const App: React.FC = () => {
                             <option value="manager">مشرف</option>
                             <option value="admin">مدير نظام</option>
                           </select>
+                        </td>
+                        <td className="py-6 text-left pl-4">
+                          <button
+                            onClick={() => handleDeleteUser(profile.id)}
+                            disabled={profile.id === session?.user?.id}
+                            className="p-2 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="حذف المستخدم"
+                          >
+                            <Trash2 size={16} />
+                          </button>
                         </td>
                       </tr>
                     ))}
